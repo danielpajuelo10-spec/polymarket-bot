@@ -291,27 +291,51 @@ class PolymarketBot:
 
 if __name__ == "__main__":
     markets_to_watch = [
-        # Ejemplo: Mercado de elecciones de EE.UU.
-        # Para encontrar el token_id ve a un mercado en Polymarket,
-        # abre DevTools y busca la petición a la CLOB API, o usa:
-        # python -c "from client import get_markets; import json; print(json.dumps(get_markets(5), indent=2))"
 
+        # 1. FIFA — Spain wins 2026 World Cup (YES, ~15 cents)
+        #    Buy if dips under 12 cents, sell above 25 cents.
         MarketConfig(
-            token_id="REEMPLAZA_CON_TOKEN_ID_REAL",   # <-- Token ID del mercado
-            label="Mi primer mercado",
+            token_id="4394372887385518214471608448209527405727552777602031099972143344338178308080",
+            label="Spain wins World Cup 2026",
             strategy="value_threshold",
-            buy_below=0.30,    # Compra si el precio es menor de 30 cents
-            sell_above=0.70,   # Vende si el precio supera 70 cents
-            size_usdc=20,      # Usa 20 USDC por operación
+            buy_below=0.12,
+            sell_above=0.25,
+            size_usdc=10,
         ),
 
-        # Descomenta para añadir más mercados:
-        # MarketConfig(
-        #     token_id="OTRO_TOKEN_ID",
-        #     label="Otro mercado",
-        #     strategy="mean_reversion",
-        #     size_usdc=15,
-        # ),
+        # 2. CRYPTO — Bitcoin hits $1M before GTA VI release (YES, ~49 cents)
+        #    Near 50/50 market; buy dips under 40 cents, sell above 65 cents.
+        MarketConfig(
+            token_id="105267568073659068217311993901927962476298440625043565106676088842803600775810",
+            label="Bitcoin $1M before GTA VI",
+            strategy="value_threshold",
+            buy_below=0.40,
+            sell_above=0.65,
+            size_usdc=10,
+        ),
+
+        # 3. US POLITICS — Jasmine Crockett wins 2028 Dem nomination (YES, ~0.75 cents)
+        #    Low probability market; buy dips under 0.5 cents, sell above 2 cents.
+        MarketConfig(
+            token_id="22103094389913052942362639589409218272323168761614999702665821259175535456835",
+            label="Crockett wins 2028 Dem nom",
+            strategy="value_threshold",
+            buy_below=0.005,
+            sell_above=0.02,
+            size_usdc=10,
+        ),
+
+        # 4. AI/TECH — Elon Musk wins 2028 US Presidential Election (YES, ~1 cent)
+        #    Speculative tech-adjacent market; buy under 0.8 cents, sell above 3 cents.
+        MarketConfig(
+            token_id="26641906520532802078452346454133721131611596169940893262820937050881742190686",
+            label="Elon Musk wins 2028 election",
+            strategy="value_threshold",
+            buy_below=0.008,
+            sell_above=0.03,
+            size_usdc=10,
+        ),
+
     ]
 
     bot = PolymarketBot(markets=markets_to_watch)
