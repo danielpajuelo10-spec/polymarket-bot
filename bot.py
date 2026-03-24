@@ -37,6 +37,7 @@ from strategy import (
 )
 from paper_trading import PaperTrader
 from optimizer import StrategyOptimizer
+from telegram_reporter import TelegramReporter
 from logger import get_logger
 
 log = get_logger()
@@ -94,6 +95,9 @@ class PolymarketBot:
 
         # Self-optimization engine
         self._optimizer = StrategyOptimizer()
+
+        # Telegram daily reporter
+        self._reporter = TelegramReporter()
 
         # Manejador de señales para Ctrl+C limpio
         signal.signal(signal.SIGINT, self._handle_exit)
@@ -286,6 +290,16 @@ class PolymarketBot:
             # Run self-optimization every 24h (or OPTIMIZE_INTERVAL_SECONDS)
             if self._optimizer.should_run():
                 self._optimizer.run(self.markets)
+
+            # Send Telegram daily report
+            if self._reporter.should_report():
+                prices = self._get_current_prices()
+                starting = (
+                    self._paper.starting_balance
+                    if self._paper
+                    else config.PAPER_TRADING_BALANCE
+                )
+                self._reporter.send_daily_report(starting, prices)
 
             if self.running:
                 log.info("Esperando %d segundos...", config.LOOP_INTERVAL_SECONDS)
