@@ -1,0 +1,15 @@
+# Credenciales — nunca subir al repo
+.env
+
+# Log de paper trading con datos de sesión
+paper_trades.json
+
+# Log general del bot
+bot.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
