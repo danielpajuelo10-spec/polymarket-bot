@@ -4,6 +4,9 @@
 # Log de paper trading con datos de sesión
 paper_trades.json
 
+# Estado del optimizador (thresholds ajustados + historial de cambios)
+optimizer_state.json
+
 # Log general del bot
 bot.log
 

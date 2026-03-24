@@ -36,6 +36,7 @@ from strategy import (
     check_exit_conditions,
 )
 from paper_trading import PaperTrader
+from optimizer import StrategyOptimizer
 from logger import get_logger
 
 log = get_logger()
@@ -91,6 +92,9 @@ class PolymarketBot:
         # Estrategias de mean reversion por token
         self._mr_strategies: dict[str, MeanReversionStrategy] = {}
 
+        # Self-optimization engine
+        self._optimizer = StrategyOptimizer()
+
         # Manejador de señales para Ctrl+C limpio
         signal.signal(signal.SIGINT, self._handle_exit)
         signal.signal(signal.SIGTERM, self._handle_exit)
@@ -102,6 +106,7 @@ class PolymarketBot:
             prices = self._get_current_prices()
             self._paper.print_summary(prices)
             self._paper.print_trade_history()
+        self._optimizer.print_summary()
 
     # -----------------------------------------------------------------------
     # Lógica por mercado
@@ -277,6 +282,10 @@ class PolymarketBot:
 
             if iteration % 5 == 0:
                 self.print_status()
+
+            # Run self-optimization every 24h (or OPTIMIZE_INTERVAL_SECONDS)
+            if self._optimizer.should_run():
+                self._optimizer.run(self.markets)
 
             if self.running:
                 log.info("Esperando %d segundos...", config.LOOP_INTERVAL_SECONDS)
