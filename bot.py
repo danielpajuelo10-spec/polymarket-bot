@@ -104,12 +104,20 @@ class PolymarketBot:
         signal.signal(signal.SIGTERM, self._handle_exit)
 
     def _handle_exit(self, *_):
-        log.warning("Señal de parada recibida. Cerrando bot...")
+        log.warning("Senal de parada recibida. Cerrando bot...")
         self.running = False
         if self._paper:
             prices = self._get_current_prices()
             self._paper.print_summary(prices)
             self._paper.print_trade_history()
+            equity = self._paper.total_equity(prices)
+            ret_pct = (equity - self._paper.starting_balance) / self._paper.starting_balance * 100
+            self._reporter.send_alert(
+                f"*Bot detenido*\n"
+                f"Equity final: `{equity:.2f} USDC`\n"
+                f"Retorno total: `{ret_pct:+.1f}%`\n"
+                f"Trades realizados: `{len(self._paper.trade_log)}`"
+            )
         self._optimizer.print_summary()
 
     # -----------------------------------------------------------------------
@@ -186,13 +194,22 @@ class PolymarketBot:
             if exit_signal.action == "SELL":
                 log.info("[%s] %s", market.label, exit_signal.reason)
                 if self.paper_trading and self._paper:
-                    self._paper.simulate_sell(market.token_id, market.label, price)
+                    pnl = self._paper.simulate_sell(market.token_id, market.label, price)
+                    if pnl is not None:
+                        self._reporter.send_trade_alert(
+                            "SELL", market.label, price, size_usdc,
+                            self._paper.balance, pnl=pnl, paper=True,
+                        )
                 else:
                     result = place_limit_order(
                         self.client, market.token_id, "SELL", price, size_usdc
                     )
                     if result:
                         del self._positions[market.token_id]
+                        self._reporter.send_trade_alert(
+                            "SELL", market.label, price, size_usdc,
+                            balance=0, pnl=None, paper=False,
+                        )
                 return
 
         # 2. Evaluar señal de entrada
@@ -213,9 +230,14 @@ class PolymarketBot:
                 log.info("[%s] Ya hay posición abierta, esperando", market.label)
                 return
 
-            log.info("[%s] COMPRANDO | Razón: %s", market.label, signal_.reason)
+            log.info("[%s] COMPRANDO | Razon: %s", market.label, signal_.reason)
             if self.paper_trading and self._paper:
-                self._paper.simulate_buy(market.token_id, market.label, price, size)
+                ok = self._paper.simulate_buy(market.token_id, market.label, price, size)
+                if ok:
+                    self._reporter.send_trade_alert(
+                        "BUY", market.label, price, size,
+                        self._paper.balance, paper=True,
+                    )
             else:
                 result = place_limit_order(self.client, market.token_id, "BUY", price, size)
                 if result:
@@ -226,11 +248,21 @@ class PolymarketBot:
                         size_usdc=size,
                         side="BUY",
                     )
+                    self._reporter.send_trade_alert(
+                        "BUY", market.label, price, size,
+                        balance=0, paper=False,
+                    )
 
         elif signal_.action == "SELL" and self._has_open_position(market.token_id):
-            log.info("[%s] VENDIENDO | Razón: %s", market.label, signal_.reason)
+            log.info("[%s] VENDIENDO | Razon: %s", market.label, signal_.reason)
             if self.paper_trading and self._paper:
-                self._paper.simulate_sell(market.token_id, market.label, price)
+                pos = self._paper.positions[market.token_id]
+                pnl = self._paper.simulate_sell(market.token_id, market.label, price)
+                if pnl is not None:
+                    self._reporter.send_trade_alert(
+                        "SELL", market.label, price, pos.size_usdc,
+                        self._paper.balance, pnl=pnl, paper=True,
+                    )
             else:
                 pos = self._positions[market.token_id]
                 result = place_limit_order(
@@ -238,6 +270,10 @@ class PolymarketBot:
                 )
                 if result:
                     del self._positions[market.token_id]
+                    self._reporter.send_trade_alert(
+                        "SELL", market.label, price, pos.size_usdc,
+                        balance=0, pnl=None, paper=False,
+                    )
 
         else:
             log.info("[%s] HOLD | %s", market.label, signal_.reason)
@@ -272,6 +308,14 @@ class PolymarketBot:
         log.info("Bot iniciado en modo %s. Monitoreando %d mercados.", mode, len(self.markets))
         log.info("Intervalo: %d segundos | Red: %s", config.LOOP_INTERVAL_SECONDS, config.NETWORK)
         self.running = True
+
+        balance = self._paper.balance if self._paper else 0
+        market_names = ", ".join(m.label for m in self.markets)
+        self._reporter.send_alert(
+            f"*Bot iniciado* ({'PAPER' if self.paper_trading else 'REAL'})\n"
+            f"Mercados: {market_names}\n"
+            f"Saldo: `{balance:.2f} USDC`"
+        )
 
         iteration = 0
         while self.running:

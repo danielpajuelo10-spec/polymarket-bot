@@ -83,12 +83,56 @@ class TelegramReporter:
         except Exception as exc:
             log.error("[TELEGRAM] Error al enviar reporte: %s", exc)
 
+    def send_trade_alert(
+        self,
+        action: str,          # "BUY" or "SELL"
+        label: str,
+        price: float,
+        size_usdc: float,
+        balance: float,
+        pnl: float | None = None,   # Only for SELL
+        paper: bool = True,
+    ):
+        """Sends an instant Telegram notification when a trade is executed."""
+        if not self._enabled:
+            return
+
+        mode_tag = " 🟡 PAPER" if paper else " 🔴 REAL"
+        now = datetime.now().strftime("%H:%M:%S")
+
+        if action == "BUY":
+            lines = [
+                f"*COMPRA{mode_tag}*  _{now}_",
+                f"Mercado: `{label}`",
+                f"Precio:  `{price:.4f}`",
+                f"USDC:    `{size_usdc:.2f}`",
+                f"Saldo:   `{balance:.2f} USDC`",
+            ]
+        else:
+            pnl_val   = pnl if pnl is not None else 0.0
+            pnl_pct   = (pnl_val / size_usdc * 100) if size_usdc else 0.0
+            pnl_sign  = "+" if pnl_val >= 0 else ""
+            emoji     = "UP" if pnl_val >= 0 else "DOWN"
+            lines = [
+                f"*VENTA{mode_tag}*  _{now}_  {emoji}",
+                f"Mercado: `{label}`",
+                f"Precio:  `{price:.4f}`",
+                f"P&L:     `{pnl_sign}{pnl_val:.2f} USDC ({pnl_sign}{pnl_pct:.1f}%)`",
+                f"Saldo:   `{balance:.2f} USDC`",
+            ]
+
+        try:
+            self._send("\n".join(lines))
+            log.info("[TELEGRAM] Alerta de trade enviada (%s %s).", action, label)
+        except Exception as exc:
+            log.warning("[TELEGRAM] No se pudo enviar alerta de trade: %s", exc)
+
     def send_alert(self, text: str):
-        """Sends a plain-text alert message (e.g. for errors or big trades)."""
+        """Sends a plain-text alert (errors, bot start/stop, etc.)."""
         if not self._enabled:
             return
         try:
-            self._send(f"*ALERTA*\n{text}")
+            self._send(text)
         except Exception as exc:
             log.warning("[TELEGRAM] No se pudo enviar alerta: %s", exc)
 
