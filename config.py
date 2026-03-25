@@ -46,3 +46,6 @@ TAKE_PROFIT_PCT          = float(os.getenv("TAKE_PROFIT_PCT", "30"))
 
 # --- Loop ---
 LOOP_INTERVAL_SECONDS = int(os.getenv("LOOP_INTERVAL_SECONDS", "60"))
+
+# --- Cooldown entre trades del mismo mercado ---
+MIN_TRADE_INTERVAL_SECONDS = int(os.getenv("MIN_TRADE_INTERVAL_SECONDS", str(4 * 3600)))

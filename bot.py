@@ -97,6 +97,9 @@ class PolymarketBot:
         # Estrategias de mean reversion por token
         self._mr_strategies: dict[str, MeanReversionStrategy] = {}
 
+        # Cooldown: timestamp del último BUY ejecutado por token
+        self._last_trade_time: dict[str, float] = {}
+
         # Self-optimization engine
         self._optimizer = StrategyOptimizer()
 
@@ -240,6 +243,17 @@ class PolymarketBot:
                 log.info("[%s] Ya hay posicion abierta, esperando", market.label)
                 return
 
+            # Cooldown: evitar re-entrada demasiado pronto tras cerrar posición
+            last = self._last_trade_time.get(market.token_id, 0)
+            elapsed = time.time() - last
+            if elapsed < config.MIN_TRADE_INTERVAL_SECONDS:
+                remaining_min = (config.MIN_TRADE_INTERVAL_SECONDS - elapsed) / 60
+                log.info(
+                    "[%s] Cooldown activo — faltan %.0f min para siguiente entrada",
+                    market.label, remaining_min,
+                )
+                return
+
             # Sentiment filter: block BUY if news is clearly bearish
             if market.news_query and not self._sentiment.should_buy(market.news_query):
                 log.info("[%s] BUY bloqueado por sentimiento negativo en noticias.", market.label)
@@ -249,6 +263,7 @@ class PolymarketBot:
             if self.paper_trading and self._paper:
                 ok = self._paper.simulate_buy(market.token_id, market.label, price, size)
                 if ok:
+                    self._last_trade_time[market.token_id] = time.time()
                     self._reporter.send_trade_alert(
                         "BUY", market.label, price, size,
                         self._paper.balance, paper=True,
@@ -256,6 +271,7 @@ class PolymarketBot:
             else:
                 result = place_limit_order(self.client, market.token_id, "BUY", price, size)
                 if result:
+                    self._last_trade_time[market.token_id] = time.time()
                     self._positions[market.token_id] = Position(
                         token_id=market.token_id,
                         entry_price=price,
@@ -387,7 +403,7 @@ if __name__ == "__main__":
             token_id="49500299856831034491021962156746701298730459370557900271970866855042624695770",
             label="OKC Thunder wins NBA Finals",
             strategy="mean_reversion",
-            size_usdc=15,
+            size_usdc=10,
             news_query="Oklahoma City Thunder NBA Finals 2026",
             mr_window=10,
             mr_std_threshold=0.4,
