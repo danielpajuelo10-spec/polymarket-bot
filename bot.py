@@ -16,6 +16,7 @@ from __future__ import annotations
 import time
 import signal
 import sys
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -60,6 +61,7 @@ class MarketConfig:
     news_query: str = ""    # Google News RSS search query for sentiment filter
     mr_window: int = 10     # Mean reversion: lookback window
     mr_std_threshold: float = 0.4  # Mean reversion: z-score trigger
+    liquidity_usdc: float = 0      # Known market liquidity for confidence scoring
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +101,16 @@ class PolymarketBot:
 
         # Cooldown: timestamp del último BUY ejecutado por token
         self._last_trade_time: dict[str, float] = {}
+
+        # Price history for trend scoring: token_id -> deque of (timestamp, price)
+        # Keeps up to 750 entries (~6h25m at 30s interval)
+        self._price_history: dict[str, deque] = {}
+
+        # Latest known price per token (used for equity calculations)
+        self._latest_prices: dict[str, float] = {}
+
+        # Risk management state
+        self._trading_paused: bool = False
 
         # Self-optimization engine
         self._optimizer = StrategyOptimizer()
@@ -177,12 +189,93 @@ class PolymarketBot:
             return token_id in self._paper.positions
         return token_id in self._positions
 
+    def _total_equity(self) -> float:
+        """Current equity = cash balance + mark-to-market value of open positions."""
+        if self.paper_trading and self._paper:
+            return self._paper.total_equity(self._latest_prices)
+        return config.PAPER_TRADING_BALANCE  # real mode: approximate
+
+    def _calculate_confidence(self, market: MarketConfig, price: float) -> tuple[int, str]:
+        """
+        Returns (score 0-100, human-readable breakdown string).
+
+        Scoring:
+          Trend last 6h  — 40 pts
+          News sentiment — 40 pts
+          Liquidity      — 20 pts
+        """
+        # ---- 1. Price trend last 6h (0-40 pts) ----
+        history = self._price_history.get(market.token_id)
+        six_h_ago = time.time() - 6 * 3600
+
+        if history and len(history) >= 5:
+            past = [p for ts, p in history if ts >= six_h_ago]
+            ref_price = past[0] if past else list(history)[0][1]
+            change_pct = (price - ref_price) / ref_price * 100 if ref_price > 0 else 0
+
+            if change_pct > 5:
+                trend_pts, trend_desc = 40, f"+{change_pct:.1f}% alza fuerte"
+            elif change_pct > 2:
+                trend_pts, trend_desc = 30, f"+{change_pct:.1f}% alza"
+            elif change_pct > 0:
+                trend_pts, trend_desc = 25, f"+{change_pct:.1f}% leve alza"
+            elif change_pct > -0.5:
+                trend_pts, trend_desc = 20, f"{change_pct:.1f}% estable"
+            elif change_pct > -2:
+                trend_pts, trend_desc = 15, f"{change_pct:.1f}% leve baja"
+            elif change_pct > -5:
+                trend_pts, trend_desc = 10, f"{change_pct:.1f}% baja"
+            else:
+                trend_pts, trend_desc = 5, f"{change_pct:.1f}% baja fuerte"
+        else:
+            trend_pts, trend_desc = 20, "sin historial (neutral)"
+
+        # ---- 2. News sentiment (0-40 pts) ----
+        if market.news_query:
+            result = self._sentiment.analyse(market.news_query)
+            # Linear map [-1, 1] -> [0, 40]
+            sentiment_pts = max(0, min(40, int((result.score + 1) / 2 * 40)))
+            sentiment_desc = f"{result.label} ({result.score:+.2f})"
+        else:
+            sentiment_pts, sentiment_desc = 20, "sin query (neutral)"
+
+        # ---- 3. Market liquidity (0-20 pts) ----
+        liq = market.liquidity_usdc
+        if liq >= 1_000_000:
+            liq_pts, liq_desc = 20, f"${liq/1e6:.1f}M"
+        elif liq >= 500_000:
+            liq_pts, liq_desc = 16, f"${liq/1e3:.0f}K"
+        elif liq >= 200_000:
+            liq_pts, liq_desc = 12, f"${liq/1e3:.0f}K"
+        elif liq >= 100_000:
+            liq_pts, liq_desc = 8,  f"${liq/1e3:.0f}K"
+        elif liq >= 50_000:
+            liq_pts, liq_desc = 4,  f"${liq/1e3:.0f}K"
+        elif liq > 0:
+            liq_pts, liq_desc = 2,  f"${liq/1e3:.0f}K"
+        else:
+            liq_pts, liq_desc = 10, "desconocida"
+
+        total = trend_pts + sentiment_pts + liq_pts
+        breakdown = (
+            f"Tendencia={trend_pts}/40 ({trend_desc}) | "
+            f"Sentimiento={sentiment_pts}/40 ({sentiment_desc}) | "
+            f"Liquidez={liq_pts}/20 ({liq_desc})"
+        )
+        return total, breakdown
+
     def _process_market(self, market: MarketConfig):
         """Ciclo de evaluación para un mercado."""
         price = get_midpoint(self.client, market.token_id)
         if price is None:
             log.warning("[%s] Sin precio disponible, saltando", market.label)
             return
+
+        # Update price cache and history for trend scoring
+        self._latest_prices[market.token_id] = price
+        if market.token_id not in self._price_history:
+            self._price_history[market.token_id] = deque(maxlen=750)
+        self._price_history[market.token_id].append((time.time(), price))
 
         log.info("[%s] Precio actual: %.4f", market.label, price)
 
@@ -230,12 +323,36 @@ class PolymarketBot:
         log.debug("[%s] Señal: %s – %s", market.label, signal_.action, signal_.reason)
 
         if signal_.action == "BUY":
-            size = signal_.size_usdc or config.MAX_ORDER_SIZE_USDC
+            # ---- Risk check 1: balance floor ----
+            equity = self._total_equity()
+            if equity < config.BALANCE_FLOOR_USDC:
+                if not self._trading_paused:
+                    self._trading_paused = True
+                    msg = (
+                        f"*ALERTA: Balance bajo, bot pausado*\n"
+                        f"Equity actual: `{equity:.2f} USDC`\n"
+                        f"Minimo configurado: `{config.BALANCE_FLOOR_USDC:.0f} USDC`"
+                    )
+                    self._reporter.send_alert(msg)
+                    log.warning("[RISK] Equity %.2f < floor %.2f — trading pausado", equity, config.BALANCE_FLOOR_USDC)
+                return
 
-            if self._total_exposure() + size > config.MAX_TOTAL_EXPOSURE_USDC:
+            if self._trading_paused:
+                log.info("[%s] Bot pausado por balance bajo, saltando BUY", market.label)
+                return
+
+            # ---- Risk check 2: position size = min(configured, 5% of equity) ----
+            configured_size = market.size_usdc or config.MAX_ORDER_SIZE_USDC
+            max_by_pct = round(equity * config.MAX_POSITION_PCT / 100, 2)
+            size = min(configured_size, max_by_pct)
+            size = max(1.0, size)  # never below 1 USDC
+
+            # ---- Risk check 3: total exposure ≤ 30% of equity ----
+            max_exposure = equity * config.MAX_EXPOSURE_PCT / 100
+            if self._total_exposure() + size > max_exposure:
                 log.warning(
-                    "[%s] Exposicion maxima alcanzada (%.2f USDC), no se abre posicion",
-                    market.label, config.MAX_TOTAL_EXPOSURE_USDC,
+                    "[%s] Exposicion maxima alcanzada (%.0f%% de %.2f USDC), no se abre posicion",
+                    market.label, config.MAX_EXPOSURE_PCT, equity,
                 )
                 return
 
@@ -243,7 +360,7 @@ class PolymarketBot:
                 log.info("[%s] Ya hay posicion abierta, esperando", market.label)
                 return
 
-            # Cooldown: evitar re-entrada demasiado pronto tras cerrar posición
+            # ---- Risk check 4: cooldown ----
             last = self._last_trade_time.get(market.token_id, 0)
             elapsed = time.time() - last
             if elapsed < config.MIN_TRADE_INTERVAL_SECONDS:
@@ -254,19 +371,27 @@ class PolymarketBot:
                 )
                 return
 
-            # Sentiment filter: block BUY if news is clearly bearish
-            if market.news_query and not self._sentiment.should_buy(market.news_query):
-                log.info("[%s] BUY bloqueado por sentimiento negativo en noticias.", market.label)
+            # ---- Risk check 5: confidence score ----
+            confidence, breakdown = self._calculate_confidence(market, price)
+            log.info(
+                "[%s] Confianza: %d/100 | %s",
+                market.label, confidence, breakdown,
+            )
+            if confidence < config.MIN_CONFIDENCE:
+                log.info(
+                    "[%s] BUY descartado — confianza %d < minimo %d",
+                    market.label, confidence, config.MIN_CONFIDENCE,
+                )
                 return
 
-            log.info("[%s] COMPRANDO | Razon: %s", market.label, signal_.reason)
+            log.info("[%s] COMPRANDO | Confianza: %d/100 | Razon: %s", market.label, confidence, signal_.reason)
             if self.paper_trading and self._paper:
                 ok = self._paper.simulate_buy(market.token_id, market.label, price, size)
                 if ok:
                     self._last_trade_time[market.token_id] = time.time()
                     self._reporter.send_trade_alert(
                         "BUY", market.label, price, size,
-                        self._paper.balance, paper=True,
+                        self._paper.balance, paper=True, confidence=confidence,
                     )
             else:
                 result = place_limit_order(self.client, market.token_id, "BUY", price, size)
@@ -281,7 +406,7 @@ class PolymarketBot:
                     )
                     self._reporter.send_trade_alert(
                         "BUY", market.label, price, size,
-                        balance=0, paper=False,
+                        balance=0, paper=False, confidence=confidence,
                     )
 
         elif signal_.action == "SELL" and self._has_open_position(market.token_id):
@@ -407,6 +532,7 @@ if __name__ == "__main__":
             news_query="Oklahoma City Thunder NBA Finals 2026",
             mr_window=10,
             mr_std_threshold=0.4,
+            liquidity_usdc=301_635,
         ),
 
         # 2. FIFA — England wins 2026 World Cup (YES, ~13 cents)
@@ -420,6 +546,7 @@ if __name__ == "__main__":
             sell_above=0.150,
             size_usdc=10,
             news_query="England FIFA World Cup 2026",
+            liquidity_usdc=1_342_046,
         ),
 
         # 3. FIFA — Argentina wins 2026 World Cup (YES, ~10 cents)
@@ -431,6 +558,7 @@ if __name__ == "__main__":
             sell_above=0.118,
             size_usdc=10,
             news_query="Argentina FIFA World Cup 2026",
+            liquidity_usdc=1_117_199,
         ),
 
         # 4. FIFA — Brazil wins 2026 World Cup (YES, ~8-9 cents)
@@ -442,6 +570,7 @@ if __name__ == "__main__":
             sell_above=0.102,
             size_usdc=10,
             news_query="Brazil FIFA World Cup 2026",
+            liquidity_usdc=923_093,
         ),
 
         # 5. FIFA — France wins 2026 World Cup (YES, ~10.6 cents)
@@ -454,6 +583,7 @@ if __name__ == "__main__":
             news_query="France FIFA World Cup 2026",
             mr_window=10,
             mr_std_threshold=0.4,
+            liquidity_usdc=1_337_354,
         ),
 
         # 6. FIFA — Germany wins 2026 World Cup (YES, ~5.2 cents)
@@ -466,6 +596,7 @@ if __name__ == "__main__":
             news_query="Germany FIFA World Cup 2026",
             mr_window=10,
             mr_std_threshold=0.4,
+            liquidity_usdc=638_021,
         ),
 
         # 7. FIFA — Portugal wins 2026 World Cup (YES, ~6.9 cents)
@@ -478,6 +609,7 @@ if __name__ == "__main__":
             news_query="Portugal FIFA World Cup 2026",
             mr_window=10,
             mr_std_threshold=0.4,
+            liquidity_usdc=478_009,
         ),
 
         # 8. NBA — Boston Celtics wins 2026 Finals (YES, ~11.2 cents)
@@ -490,6 +622,7 @@ if __name__ == "__main__":
             news_query="Boston Celtics NBA Finals 2026",
             mr_window=10,
             mr_std_threshold=0.4,
+            liquidity_usdc=153_062,
         ),
 
         # 9. CRYPTO — Will Bitcoin hit $1M before GTA VI? (YES, ~48.8 cents)
@@ -502,6 +635,7 @@ if __name__ == "__main__":
             news_query="Bitcoin price 2026",
             mr_window=10,
             mr_std_threshold=0.4,
+            liquidity_usdc=423_763,
         ),
 
     ]

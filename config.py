@@ -49,3 +49,9 @@ LOOP_INTERVAL_SECONDS = int(os.getenv("LOOP_INTERVAL_SECONDS", "60"))
 
 # --- Cooldown entre trades del mismo mercado ---
 MIN_TRADE_INTERVAL_SECONDS = int(os.getenv("MIN_TRADE_INTERVAL_SECONDS", str(4 * 3600)))
+
+# --- Gestión de riesgo avanzada ---
+BALANCE_FLOOR_USDC = float(os.getenv("BALANCE_FLOOR_USDC", "850"))   # pausa si equity cae aquí
+MAX_POSITION_PCT   = float(os.getenv("MAX_POSITION_PCT",   "5"))     # max % equity por operación
+MAX_EXPOSURE_PCT   = float(os.getenv("MAX_EXPOSURE_PCT",   "30"))    # max % equity en posiciones
+MIN_CONFIDENCE     = int(os.getenv("MIN_CONFIDENCE",       "60"))    # score mínimo para operar

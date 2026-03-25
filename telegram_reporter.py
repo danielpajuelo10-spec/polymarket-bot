@@ -85,20 +85,22 @@ class TelegramReporter:
 
     def send_trade_alert(
         self,
-        action: str,          # "BUY" or "SELL"
+        action: str,                    # "BUY" or "SELL"
         label: str,
         price: float,
         size_usdc: float,
         balance: float,
-        pnl: float | None = None,   # Only for SELL
+        pnl: float | None = None,       # Only for SELL
         paper: bool = True,
+        confidence: int | None = None,  # 0-100 confidence score
     ):
         """Sends an instant Telegram notification when a trade is executed."""
         if not self._enabled:
             return
 
-        mode_tag = " 🟡 PAPER" if paper else " 🔴 REAL"
+        mode_tag = " PAPER" if paper else " REAL"
         now = datetime.now().strftime("%H:%M:%S")
+        conf_line = f"Confianza: `{confidence}/100`" if confidence is not None else None
 
         if action == "BUY":
             lines = [
@@ -108,6 +110,8 @@ class TelegramReporter:
                 f"USDC:    `{size_usdc:.2f}`",
                 f"Saldo:   `{balance:.2f} USDC`",
             ]
+            if conf_line:
+                lines.append(conf_line)
         else:
             pnl_val   = pnl if pnl is not None else 0.0
             pnl_pct   = (pnl_val / size_usdc * 100) if size_usdc else 0.0
