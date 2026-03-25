@@ -38,13 +38,18 @@ class TelegramReporter:
     """
     Reads paper_trades.json + optimizer_state.json and sends a
     Markdown-formatted summary to a Telegram chat.
+
+    Scheduling:
+      Daily report  — fires once per day at 08:00 local time.
+      Weekly report — fires once per week on Monday at 08:00 local time.
     """
 
     def __init__(self, trades_file: str = "paper_trades.json"):
-        self.token    = os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id  = os.getenv("TELEGRAM_CHAT_ID",   "")
+        self.token       = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        self.chat_id     = os.getenv("TELEGRAM_CHAT_ID",   "")
         self.trades_file = trades_file
-        self._last_report: float = 0.0
+        self._last_report: float        = 0.0
+        self._last_weekly_report: float = 0.0
         self._enabled = bool(self.token and self.chat_id)
 
         if not self._enabled:
@@ -53,22 +58,44 @@ class TelegramReporter:
                 "Reportes desactivados."
             )
         else:
-            log.info("[TELEGRAM] Reporter configurado. Primer reporte en %dh.",
-                     REPORT_INTERVAL_SECONDS // 3600)
+            log.info("[TELEGRAM] Reporter configurado. Reporte diario a las 08:00.")
 
     # -----------------------------------------------------------------------
-    # Public API
+    # Scheduling helpers
     # -----------------------------------------------------------------------
+
+    @staticmethod
+    def _today_at_8am() -> datetime:
+        return datetime.now().replace(hour=8, minute=0, second=0, microsecond=0)
 
     def should_report(self) -> bool:
-        return self._enabled and (time.time() - self._last_report) >= REPORT_INTERVAL_SECONDS
+        """True once per day after 08:00, regardless of bot start time."""
+        if not self._enabled:
+            return False
+        cutoff = self._today_at_8am()
+        if datetime.now() < cutoff:
+            return False
+        last_dt = datetime.fromtimestamp(self._last_report) if self._last_report else datetime.min
+        return last_dt < cutoff
+
+    def should_weekly_report(self) -> bool:
+        """True once per Monday after 08:00."""
+        if not self._enabled:
+            return False
+        if datetime.now().weekday() != 0:   # 0 = Monday
+            return False
+        cutoff = self._today_at_8am()
+        if datetime.now() < cutoff:
+            return False
+        last_dt = datetime.fromtimestamp(self._last_weekly_report) if self._last_weekly_report else datetime.min
+        return last_dt < cutoff
 
     def send_daily_report(
         self,
         starting_balance: float,
         current_prices: dict[str, float] | None = None,
     ):
-        """Builds and sends the daily report."""
+        """Builds and sends the daily 08:00 report."""
         self._last_report = time.time()
 
         if not self._enabled:
@@ -82,6 +109,66 @@ class TelegramReporter:
             log.info("[TELEGRAM] Reporte diario enviado correctamente.")
         except Exception as exc:
             log.error("[TELEGRAM] Error al enviar reporte: %s", exc)
+
+    def send_weekly_report(
+        self,
+        starting_balance: float,
+        current_prices: dict[str, float] | None = None,
+    ):
+        """Builds and sends the Monday 08:00 weekly summary."""
+        self._last_weekly_report = time.time()
+
+        if not self._enabled:
+            return
+
+        data      = self._load_trades()
+        trades    = data.get("trades", [])
+        balance   = data.get("current_balance", starting_balance)
+
+        # Trades from the last 7 days
+        week_ago  = time.time() - 7 * 24 * 3600
+        week_sells = [
+            t for t in trades
+            if t["action"] == "SELL"
+            and t.get("pnl") is not None
+            and _parse_ts(t["timestamp"]) >= week_ago
+        ]
+
+        # Per-market P&L this week
+        market_pnl: dict[str, float] = {}
+        for t in week_sells:
+            lbl = t["label"]
+            market_pnl[lbl] = market_pnl.get(lbl, 0.0) + t["pnl"]
+
+        best_market  = max(market_pnl, key=market_pnl.get) if market_pnl else None
+        worst_market = min(market_pnl, key=market_pnl.get) if market_pnl else None
+
+        wins      = [t for t in week_sells if t["pnl"] > 0]
+        win_rate  = len(wins) / len(week_sells) * 100 if week_sells else 0.0
+        total_ret = balance - starting_balance
+        ret_pct   = total_ret / starting_balance * 100 if starting_balance else 0.0
+
+        now_str = datetime.now().strftime("%Y-%m-%d")
+        lines = [
+            f"*Resumen Semanal — {now_str}*",
+            "",
+            f"Retorno total:  `{total_ret:+.2f} USDC ({ret_pct:+.1f}%)`",
+            f"Saldo actual:   `{balance:.2f} USDC`",
+            f"Trades (7d):    `{len(week_sells)} cerradas`",
+            f"Win rate (7d):  `{win_rate:.0f}%`",
+            "",
+        ]
+        if best_market:
+            lines.append(f"Mejor mercado:  `{best_market[:28]}` +{market_pnl[best_market]:.2f} USDC")
+        if worst_market and worst_market != best_market:
+            lines.append(f"Peor mercado:   `{worst_market[:28]}` {market_pnl[worst_market]:.2f} USDC")
+        lines.append("_Modo: PAPER TRADING_")
+
+        try:
+            self._send("\n".join(lines))
+            log.info("[TELEGRAM] Resumen semanal enviado.")
+        except Exception as exc:
+            log.error("[TELEGRAM] Error al enviar resumen semanal: %s", exc)
 
     def send_trade_alert(
         self,

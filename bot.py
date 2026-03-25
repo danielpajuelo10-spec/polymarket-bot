@@ -112,6 +112,9 @@ class PolymarketBot:
         # Risk management state
         self._trading_paused: bool = False
 
+        # Hourly backup state
+        self._last_backup: float = 0.0
+
         # Self-optimization engine
         self._optimizer = StrategyOptimizer()
 
@@ -306,6 +309,15 @@ class PolymarketBot:
             return True, f"{change_pct:+.1f}% vs hace 24h"
         return False, f"{change_pct:.1f}% caida en 24h (>{config.MAX_DRAWDOWN_24H_PCT:.0f}% drawdown)"
 
+    def _do_backup(self):
+        """Copies paper_trades.json -> paper_trades_backup.json."""
+        import shutil
+        try:
+            shutil.copy("paper_trades.json", "paper_trades_backup.json")
+            log.info("[BACKUP] paper_trades_backup.json actualizado")
+        except Exception as exc:
+            log.warning("[BACKUP] Error al hacer copia de seguridad: %s", exc)
+
     def _process_market(self, market: MarketConfig):
         """Ciclo de evaluación para un mercado."""
         price = get_midpoint(self.client, market.token_id)
@@ -345,6 +357,13 @@ class PolymarketBot:
                 if self.paper_trading and self._paper:
                     pnl = self._paper.simulate_sell(market.token_id, market.label, price)
                     if pnl is not None:
+                        if pnl <= -config.TRADE_LOSS_ALERT_USDC:
+                            self._reporter.send_alert(
+                                f"*ALERTA: Perdida elevada en trade*\n"
+                                f"Mercado: `{market.label}`\n"
+                                f"Perdida: `{pnl:.2f} USDC` (umbral: -{config.TRADE_LOSS_ALERT_USDC:.0f} USDC)\n"
+                                f"Razon: _{exit_signal.reason}_"
+                            )
                         self._reporter.send_trade_alert(
                             "SELL", market.label, price, size_usdc,
                             self._paper.balance, pnl=pnl, paper=True,
@@ -488,6 +507,13 @@ class PolymarketBot:
                 pos = self._paper.positions[market.token_id]
                 pnl = self._paper.simulate_sell(market.token_id, market.label, price)
                 if pnl is not None:
+                    if pnl <= -config.TRADE_LOSS_ALERT_USDC:
+                        self._reporter.send_alert(
+                            f"*ALERTA: Perdida elevada en trade*\n"
+                            f"Mercado: `{market.label}`\n"
+                            f"Perdida: `{pnl:.2f} USDC` (umbral: -{config.TRADE_LOSS_ALERT_USDC:.0f} USDC)\n"
+                            f"Razon: _{signal_.reason}_"
+                        )
                     self._reporter.send_trade_alert(
                         "SELL", market.label, price, pos.size_usdc,
                         self._paper.balance, pnl=pnl, paper=True, confidence=confidence,
@@ -564,7 +590,7 @@ class PolymarketBot:
             if self._optimizer.should_run():
                 self._optimizer.run(self.markets)
 
-            # Send Telegram daily report
+            # Send Telegram daily report at 08:00
             if self._reporter.should_report():
                 prices = self._get_current_prices()
                 starting = (
@@ -573,6 +599,21 @@ class PolymarketBot:
                     else config.PAPER_TRADING_BALANCE
                 )
                 self._reporter.send_daily_report(starting, prices)
+
+            # Send Telegram weekly summary every Monday at 08:00
+            if self._reporter.should_weekly_report():
+                prices = self._get_current_prices()
+                starting = (
+                    self._paper.starting_balance
+                    if self._paper
+                    else config.PAPER_TRADING_BALANCE
+                )
+                self._reporter.send_weekly_report(starting, prices)
+
+            # Hourly backup of paper_trades.json
+            if time.time() - self._last_backup >= config.BACKUP_INTERVAL_SECONDS:
+                self._do_backup()
+                self._last_backup = time.time()
 
             if self.running:
                 log.info("Esperando %d segundos...", config.LOOP_INTERVAL_SECONDS)

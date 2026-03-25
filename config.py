@@ -57,3 +57,7 @@ MAX_EXPOSURE_PCT     = float(os.getenv("MAX_EXPOSURE_PCT",     "30"))   # max % 
 MIN_CONFIDENCE       = int(os.getenv("MIN_CONFIDENCE",         "60"))   # score mínimo para operar
 MIN_LIQUIDITY_USDC   = float(os.getenv("MIN_LIQUIDITY_USDC",   "500000"))  # omite mercados ilíquidos
 MAX_DRAWDOWN_24H_PCT = float(os.getenv("MAX_DRAWDOWN_24H_PCT", "15"))   # bloquea si cayó >15% en 24h
+
+# --- Alertas y backups ---
+TRADE_LOSS_ALERT_USDC   = float(os.getenv("TRADE_LOSS_ALERT_USDC",   "5"))     # alerta si trade pierde > X USDC
+BACKUP_INTERVAL_SECONDS = int(os.getenv("BACKUP_INTERVAL_SECONDS",   "3600"))  # backup cada hora
