@@ -264,6 +264,48 @@ class PolymarketBot:
         )
         return total, breakdown
 
+    def _check_momentum(self, token_id: str, price: float) -> tuple[bool, str]:
+        """
+        Returns (True = OK to buy, reason).
+        Blocks BUY if price has fallen more than 0.5% over the last 6 hours.
+        Allows through when there is not yet enough history.
+        """
+        history = self._price_history.get(token_id)
+        if not history or len(history) < 5:
+            return True, "sin historial 6h (permitido)"
+
+        six_h_ago = time.time() - 6 * 3600
+        past_6h = [p for ts, p in history if ts >= six_h_ago]
+        ref = past_6h[0] if past_6h else list(history)[0][1]
+
+        if ref <= 0:
+            return True, "referencia invalida"
+
+        change_pct = (price - ref) / ref * 100
+        if change_pct >= -0.5:
+            return True, f"{change_pct:+.1f}% en 6h"
+        return False, f"{change_pct:.1f}% en 6h (momentum negativo)"
+
+    def _check_24h_drawdown(self, token_id: str, price: float) -> tuple[bool, str]:
+        """
+        Returns (True = OK to buy, reason).
+        Blocks BUY if price has fallen more than MAX_DRAWDOWN_24H_PCT from the
+        oldest available price point (up to 24h ago).
+        Requires at least 60 data points (~30 min) before activating.
+        """
+        history = self._price_history.get(token_id)
+        if not history or len(history) < 60:
+            return True, "sin historial 24h (permitido)"
+
+        oldest_price = list(history)[0][1]
+        if oldest_price <= 0:
+            return True, "precio base invalido"
+
+        change_pct = (price - oldest_price) / oldest_price * 100
+        if change_pct > -config.MAX_DRAWDOWN_24H_PCT:
+            return True, f"{change_pct:+.1f}% vs hace 24h"
+        return False, f"{change_pct:.1f}% caida en 24h (>{config.MAX_DRAWDOWN_24H_PCT:.0f}% drawdown)"
+
     def _process_market(self, market: MarketConfig):
         """Ciclo de evaluación para un mercado."""
         price = get_midpoint(self.client, market.token_id)
@@ -274,7 +316,7 @@ class PolymarketBot:
         # Update price cache and history for trend scoring
         self._latest_prices[market.token_id] = price
         if market.token_id not in self._price_history:
-            self._price_history[market.token_id] = deque(maxlen=750)
+            self._price_history[market.token_id] = deque(maxlen=2950)  # ~24h at 30s
         self._price_history[market.token_id].append((time.time(), price))
 
         log.info("[%s] Precio actual: %.4f", market.label, price)
@@ -299,12 +341,14 @@ class PolymarketBot:
             )
             if exit_signal.action == "SELL":
                 log.info("[%s] %s", market.label, exit_signal.reason)
+                exit_confidence, _ = self._calculate_confidence(market, price)
                 if self.paper_trading and self._paper:
                     pnl = self._paper.simulate_sell(market.token_id, market.label, price)
                     if pnl is not None:
                         self._reporter.send_trade_alert(
                             "SELL", market.label, price, size_usdc,
                             self._paper.balance, pnl=pnl, paper=True,
+                            confidence=exit_confidence,
                         )
                 else:
                     result = place_limit_order(
@@ -315,6 +359,7 @@ class PolymarketBot:
                         self._reporter.send_trade_alert(
                             "SELL", market.label, price, size_usdc,
                             balance=0, pnl=None, paper=False,
+                            confidence=exit_confidence,
                         )
                 return
 
@@ -371,7 +416,29 @@ class PolymarketBot:
                 )
                 return
 
-            # ---- Risk check 5: confidence score ----
+            # ---- Filter 5: liquidity floor ----
+            if market.liquidity_usdc > 0 and market.liquidity_usdc < config.MIN_LIQUIDITY_USDC:
+                log.info(
+                    "[%s] Liquidez insuficiente ($%.0fK < $%.0fK minimo), saltando",
+                    market.label,
+                    market.liquidity_usdc / 1000,
+                    config.MIN_LIQUIDITY_USDC / 1000,
+                )
+                return
+
+            # ---- Filter 6: momentum (price stable or rising last 6h) ----
+            mom_ok, mom_reason = self._check_momentum(market.token_id, price)
+            if not mom_ok:
+                log.info("[%s] Momentum negativo — %s, BUY bloqueado", market.label, mom_reason)
+                return
+
+            # ---- Filter 7: 24h drawdown ----
+            dd_ok, dd_reason = self._check_24h_drawdown(market.token_id, price)
+            if not dd_ok:
+                log.info("[%s] Drawdown excesivo — %s, BUY bloqueado", market.label, dd_reason)
+                return
+
+            # ---- Risk check 8: confidence score ----
             confidence, breakdown = self._calculate_confidence(market, price)
             log.info(
                 "[%s] Confianza: %d/100 | %s",
@@ -415,14 +482,15 @@ class PolymarketBot:
                 log.info("[%s] SELL retenido — noticias positivas, manteniendo posicion.", market.label)
                 return
 
-            log.info("[%s] VENDIENDO | Razon: %s", market.label, signal_.reason)
+            confidence, _ = self._calculate_confidence(market, price)
+            log.info("[%s] VENDIENDO | Confianza: %d/100 | Razon: %s", market.label, confidence, signal_.reason)
             if self.paper_trading and self._paper:
                 pos = self._paper.positions[market.token_id]
                 pnl = self._paper.simulate_sell(market.token_id, market.label, price)
                 if pnl is not None:
                     self._reporter.send_trade_alert(
                         "SELL", market.label, price, pos.size_usdc,
-                        self._paper.balance, pnl=pnl, paper=True,
+                        self._paper.balance, pnl=pnl, paper=True, confidence=confidence,
                     )
             else:
                 pos = self._positions[market.token_id]
@@ -433,7 +501,7 @@ class PolymarketBot:
                     del self._positions[market.token_id]
                     self._reporter.send_trade_alert(
                         "SELL", market.label, price, pos.size_usdc,
-                        balance=0, pnl=None, paper=False,
+                        balance=0, pnl=None, paper=False, confidence=confidence,
                     )
 
         else:
