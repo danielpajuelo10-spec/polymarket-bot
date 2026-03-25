@@ -38,6 +38,7 @@ from strategy import (
 from paper_trading import PaperTrader
 from optimizer import StrategyOptimizer
 from telegram_reporter import TelegramReporter
+from sentiment import SentimentAnalyzer
 from logger import get_logger
 
 log = get_logger()
@@ -56,6 +57,7 @@ class MarketConfig:
     buy_below: float = 0.35
     sell_above: float = 0.65
     size_usdc: float = None  # None = usa MAX_ORDER_SIZE_USDC de config
+    news_query: str = ""    # Google News RSS search query for sentiment filter
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +97,9 @@ class PolymarketBot:
 
         # Self-optimization engine
         self._optimizer = StrategyOptimizer()
+
+        # News sentiment analyser
+        self._sentiment = SentimentAnalyzer()
 
         # Telegram daily reporter
         self._reporter = TelegramReporter()
@@ -221,13 +226,18 @@ class PolymarketBot:
 
             if self._total_exposure() + size > config.MAX_TOTAL_EXPOSURE_USDC:
                 log.warning(
-                    "[%s] Exposición máxima alcanzada (%.2f USDC), no se abre posición",
+                    "[%s] Exposicion maxima alcanzada (%.2f USDC), no se abre posicion",
                     market.label, config.MAX_TOTAL_EXPOSURE_USDC,
                 )
                 return
 
             if self._has_open_position(market.token_id):
-                log.info("[%s] Ya hay posición abierta, esperando", market.label)
+                log.info("[%s] Ya hay posicion abierta, esperando", market.label)
+                return
+
+            # Sentiment filter: block BUY if news is clearly bearish
+            if market.news_query and not self._sentiment.should_buy(market.news_query):
+                log.info("[%s] BUY bloqueado por sentimiento negativo en noticias.", market.label)
                 return
 
             log.info("[%s] COMPRANDO | Razon: %s", market.label, signal_.reason)
@@ -254,6 +264,11 @@ class PolymarketBot:
                     )
 
         elif signal_.action == "SELL" and self._has_open_position(market.token_id):
+            # Sentiment filter: hold if news is clearly bullish (let winners run)
+            if market.news_query and not self._sentiment.should_sell(market.news_query):
+                log.info("[%s] SELL retenido — noticias positivas, manteniendo posicion.", market.label)
+                return
+
             log.info("[%s] VENDIENDO | Razon: %s", market.label, signal_.reason)
             if self.paper_trading and self._paper:
                 pos = self._paper.positions[market.token_id]
@@ -361,7 +376,6 @@ if __name__ == "__main__":
 
         # 1. SPORTS — OKC Thunder wins 2026 NBA Finals (YES, ~38.5 cents)
         #    Near 50/50 market — most tradeable. $151K vol/day, $292K liquidity.
-        #    Thresholds set tight (±2-3%) so normal fluctuations trigger trades.
         MarketConfig(
             token_id="49500299856831034491021962156746701298730459370557900271970866855042624695770",
             label="OKC Thunder wins NBA Finals",
@@ -369,6 +383,7 @@ if __name__ == "__main__":
             buy_below=0.375,
             sell_above=0.408,
             size_usdc=10,
+            news_query="Oklahoma City Thunder NBA Finals 2026",
         ),
 
         # 2. FIFA — England wins 2026 World Cup (YES, ~12.9 cents)
@@ -380,6 +395,7 @@ if __name__ == "__main__":
             buy_below=0.120,
             sell_above=0.142,
             size_usdc=10,
+            news_query="England FIFA World Cup 2026",
         ),
 
         # 3. FIFA — Argentina wins 2026 World Cup (YES, ~10.1 cents)
@@ -391,6 +407,7 @@ if __name__ == "__main__":
             buy_below=0.093,
             sell_above=0.113,
             size_usdc=10,
+            news_query="Argentina FIFA World Cup 2026",
         ),
 
         # 4. FIFA — Brazil wins 2026 World Cup (YES, ~8.7 cents)
@@ -402,6 +419,7 @@ if __name__ == "__main__":
             buy_below=0.079,
             sell_above=0.099,
             size_usdc=10,
+            news_query="Brazil FIFA World Cup 2026",
         ),
 
     ]
