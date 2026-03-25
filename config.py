@@ -61,3 +61,9 @@ MAX_DRAWDOWN_24H_PCT = float(os.getenv("MAX_DRAWDOWN_24H_PCT", "15"))   # bloque
 # --- Alertas y backups ---
 TRADE_LOSS_ALERT_USDC   = float(os.getenv("TRADE_LOSS_ALERT_USDC",   "5"))     # alerta si trade pierde > X USDC
 BACKUP_INTERVAL_SECONDS = int(os.getenv("BACKUP_INTERVAL_SECONDS",   "3600"))  # backup cada hora
+
+# --- Seguridad y protección ---
+CONSECUTIVE_LOSS_PAUSE  = int(os.getenv("CONSECUTIVE_LOSS_PAUSE",    "3"))     # pausar mercado tras N pérdidas seguidas
+BLACKLIST_LOSS_USDC     = float(os.getenv("BLACKLIST_LOSS_USDC",     "15"))    # lista negra si pérdida total > X USDC
+NO_TRADE_ALERT_HOURS    = int(os.getenv("NO_TRADE_ALERT_HOURS",      "24"))    # alerta si sin trades durante N horas
+STATE_SAVE_INTERVAL_SECONDS = int(os.getenv("STATE_SAVE_INTERVAL_SECONDS", "1800"))  # guardar estado cada 30 min

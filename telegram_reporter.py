@@ -50,6 +50,7 @@ class TelegramReporter:
         self.trades_file = trades_file
         self._last_report: float        = 0.0
         self._last_weekly_report: float = 0.0
+        self._last_health_check: float  = 0.0
         self._enabled = bool(self.token and self.chat_id)
 
         if not self._enabled:
@@ -88,6 +89,16 @@ class TelegramReporter:
         if datetime.now() < cutoff:
             return False
         last_dt = datetime.fromtimestamp(self._last_weekly_report) if self._last_weekly_report else datetime.min
+        return last_dt < cutoff
+
+    def should_health_check(self) -> bool:
+        """True once per day after 09:00 (separate from 08:00 daily report)."""
+        if not self._enabled:
+            return False
+        cutoff = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0)
+        if datetime.now() < cutoff:
+            return False
+        last_dt = datetime.fromtimestamp(self._last_health_check) if self._last_health_check else datetime.min
         return last_dt < cutoff
 
     def send_daily_report(
@@ -169,6 +180,33 @@ class TelegramReporter:
             log.info("[TELEGRAM] Resumen semanal enviado.")
         except Exception as exc:
             log.error("[TELEGRAM] Error al enviar resumen semanal: %s", exc)
+
+    def send_health_check(self, checks: dict[str, bool]) -> None:
+        """Sends the daily 09:00 health check status to Telegram."""
+        self._last_health_check = time.time()
+        if not self._enabled:
+            return
+
+        all_ok  = all(checks.values())
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        status  = "OK" if all_ok else "PROBLEMAS DETECTADOS"
+
+        lines = [
+            f"*Health Check — {now_str}*",
+            f"Estado: `{status}`",
+            "",
+        ]
+        for name, ok in checks.items():
+            lines.append(f"{'OK' if ok else 'ERROR'}  `{name}`")
+
+        if not all_ok:
+            lines += ["", "_Revisar bot\\_log.txt para detalles._"]
+
+        try:
+            self._send("\n".join(lines))
+            log.info("[TELEGRAM] Health check enviado — %s", status)
+        except Exception as exc:
+            log.error("[TELEGRAM] Error al enviar health check: %s", exc)
 
     def send_trade_alert(
         self,

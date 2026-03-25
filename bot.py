@@ -13,6 +13,7 @@ Configuración:
 
 from __future__ import annotations
 
+import json
 import time
 import signal
 import sys
@@ -112,8 +113,20 @@ class PolymarketBot:
         # Risk management state
         self._trading_paused: bool = False
 
-        # Hourly backup state
-        self._last_backup: float = 0.0
+        # Per-market safety: consecutive losses and blacklist
+        self._consecutive_losses:  dict[str, int]   = {}
+        self._paused_markets:      set[str]          = set()
+        self._blacklisted_markets: set[str]          = set()
+        self._market_total_pnl:    dict[str, float]  = {}
+
+        # Activity tracking
+        self._bot_start_time:       float = time.time()
+        self._last_trade_timestamp: float = time.time()  # reset on every executed trade
+        self._last_no_trade_alert:  float = 0.0
+
+        # Periodic save / backup state
+        self._last_backup:     float = 0.0
+        self._last_state_save: float = 0.0
 
         # Self-optimization engine
         self._optimizer = StrategyOptimizer()
@@ -123,6 +136,9 @@ class PolymarketBot:
 
         # Telegram daily reporter
         self._reporter = TelegramReporter()
+
+        # Restore persisted safety state from previous run
+        self._load_state()
 
         # Manejador de señales para Ctrl+C limpio
         signal.signal(signal.SIGINT, self._handle_exit)
@@ -309,6 +325,141 @@ class PolymarketBot:
             return True, f"{change_pct:+.1f}% vs hace 24h"
         return False, f"{change_pct:.1f}% caida en 24h (>{config.MAX_DRAWDOWN_24H_PCT:.0f}% drawdown)"
 
+    # -----------------------------------------------------------------------
+    # State persistence (feature: recovery after restart)
+    # -----------------------------------------------------------------------
+
+    STATE_FILE = "bot_state.json"
+
+    def _save_state(self) -> None:
+        """Persists safety-critical state to bot_state.json every 30 minutes."""
+        state = {
+            "saved_at":            time.time(),
+            "paused_markets":      list(self._paused_markets),
+            "blacklisted_markets": list(self._blacklisted_markets),
+            "consecutive_losses":  self._consecutive_losses,
+            "market_total_pnl":    self._market_total_pnl,
+            "last_trade_time":     self._last_trade_time,
+            "last_trade_timestamp": self._last_trade_timestamp,
+        }
+        try:
+            with open(self.STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+            log.info("[STATE] Estado guardado en %s", self.STATE_FILE)
+        except Exception as exc:
+            log.warning("[STATE] Error al guardar estado: %s", exc)
+
+    def _load_state(self) -> None:
+        """Restores safety-critical state from bot_state.json on startup."""
+        try:
+            with open(self.STATE_FILE, encoding="utf-8") as f:
+                state = json.load(f)
+            self._paused_markets       = set(state.get("paused_markets", []))
+            self._blacklisted_markets  = set(state.get("blacklisted_markets", []))
+            self._consecutive_losses   = state.get("consecutive_losses", {})
+            self._market_total_pnl     = state.get("market_total_pnl", {})
+            self._last_trade_time      = state.get("last_trade_time", {})
+            self._last_trade_timestamp = state.get("last_trade_timestamp", time.time())
+            age_min = (time.time() - state.get("saved_at", time.time())) / 60
+            log.info(
+                "[STATE] Estado restaurado: %d pausados, %d en lista negra (hace %.0f min)",
+                len(self._paused_markets), len(self._blacklisted_markets), age_min,
+            )
+        except FileNotFoundError:
+            log.info("[STATE] Sin estado previo — arrancando limpio")
+        except Exception as exc:
+            log.warning("[STATE] Error al cargar estado: %s", exc)
+
+    # -----------------------------------------------------------------------
+    # Per-market loss tracking (consecutive losses + blacklist)
+    # -----------------------------------------------------------------------
+
+    def _update_loss_tracking(self, token_id: str, label: str, pnl: float) -> None:
+        """
+        Called after every closed position.
+        Updates per-market totals, triggers pause on 3 consecutive losses,
+        and permanently blacklists a market if total loss exceeds threshold.
+        """
+        # Accumulate total P&L for this market
+        self._market_total_pnl[token_id] = self._market_total_pnl.get(token_id, 0.0) + pnl
+        total = self._market_total_pnl[token_id]
+
+        # Mark last trade time
+        self._last_trade_timestamp = time.time()
+
+        # --- Blacklist: total loss exceeds threshold ---
+        if total <= -config.BLACKLIST_LOSS_USDC and token_id not in self._blacklisted_markets:
+            self._blacklisted_markets.add(token_id)
+            self._paused_markets.discard(token_id)   # blacklist supersedes pause
+            msg = (
+                f"*ALERTA: Mercado en lista negra*\n"
+                f"Mercado: `{label}`\n"
+                f"Perdida acumulada: `{total:.2f} USDC` (limite: -{config.BLACKLIST_LOSS_USDC:.0f} USDC)\n"
+                f"_Este mercado no sera operado de nuevo._"
+            )
+            log.warning("[RISK] %s en lista negra — perdida total %.2f USDC", label, total)
+            self._reporter.send_alert(msg)
+
+        # --- Consecutive losses: pause after N in a row ---
+        if pnl < 0:
+            self._consecutive_losses[token_id] = self._consecutive_losses.get(token_id, 0) + 1
+            count = self._consecutive_losses[token_id]
+            if count >= config.CONSECUTIVE_LOSS_PAUSE and token_id not in self._paused_markets \
+                    and token_id not in self._blacklisted_markets:
+                self._paused_markets.add(token_id)
+                msg = (
+                    f"Mercado pausado: {label} - {count} pérdidas consecutivas"
+                )
+                log.warning("[RISK] %s", msg)
+                self._reporter.send_alert(
+                    f"*ALERTA: {msg}*\n"
+                    f"Ultima perdida: `{pnl:.2f} USDC`\n"
+                    f"Perdida total: `{total:.2f} USDC`"
+                )
+        else:
+            # Win resets the consecutive counter
+            self._consecutive_losses[token_id] = 0
+            # Also unpause if it was paused (not blacklisted)
+            if token_id in self._paused_markets:
+                self._paused_markets.discard(token_id)
+                log.info("[RISK] %s reactivado tras trade ganador", label)
+
+    # -----------------------------------------------------------------------
+    # Health check (internet + Polymarket API + Telegram)
+    # -----------------------------------------------------------------------
+
+    def _run_health_check(self) -> dict[str, bool]:
+        """Returns a dict of service_name -> ok for the 09:00 health report."""
+        import urllib.request as urlreq
+        results: dict[str, bool] = {}
+
+        # 1. Internet
+        try:
+            urlreq.urlopen("https://www.google.com", timeout=5)
+            results["Internet"] = True
+        except Exception:
+            results["Internet"] = False
+
+        # 2. Polymarket API (fetch a midpoint price)
+        try:
+            price = get_midpoint(self.client, self.markets[0].token_id)
+            results["Polymarket API"] = price is not None
+        except Exception:
+            results["Polymarket API"] = False
+
+        # 3. Telegram Bot API
+        try:
+            import requests as req
+            resp = req.get(
+                f"https://api.telegram.org/bot{self._reporter.token}/getMe",
+                timeout=5,
+            )
+            results["Telegram Bot"] = resp.ok
+        except Exception:
+            results["Telegram Bot"] = False
+
+        return results
+
     def _do_backup(self):
         """Copies paper_trades.json -> paper_trades_backup.json."""
         import shutil
@@ -364,6 +515,7 @@ class PolymarketBot:
                                 f"Perdida: `{pnl:.2f} USDC` (umbral: -{config.TRADE_LOSS_ALERT_USDC:.0f} USDC)\n"
                                 f"Razon: _{exit_signal.reason}_"
                             )
+                        self._update_loss_tracking(market.token_id, market.label, pnl)
                         self._reporter.send_trade_alert(
                             "SELL", market.label, price, size_usdc,
                             self._paper.balance, pnl=pnl, paper=True,
@@ -424,6 +576,16 @@ class PolymarketBot:
                 log.info("[%s] Ya hay posicion abierta, esperando", market.label)
                 return
 
+            # ---- Safety check: blacklisted market ----
+            if market.token_id in self._blacklisted_markets:
+                log.info("[%s] Mercado en lista negra — saltando permanentemente", market.label)
+                return
+
+            # ---- Safety check: market paused (consecutive losses) ----
+            if market.token_id in self._paused_markets:
+                log.info("[%s] Mercado pausado por perdidas consecutivas — saltando", market.label)
+                return
+
             # ---- Risk check 4: cooldown ----
             last = self._last_trade_time.get(market.token_id, 0)
             elapsed = time.time() - last
@@ -475,6 +637,7 @@ class PolymarketBot:
                 ok = self._paper.simulate_buy(market.token_id, market.label, price, size)
                 if ok:
                     self._last_trade_time[market.token_id] = time.time()
+                    self._last_trade_timestamp = time.time()
                     self._reporter.send_trade_alert(
                         "BUY", market.label, price, size,
                         self._paper.balance, paper=True, confidence=confidence,
@@ -483,6 +646,7 @@ class PolymarketBot:
                 result = place_limit_order(self.client, market.token_id, "BUY", price, size)
                 if result:
                     self._last_trade_time[market.token_id] = time.time()
+                    self._last_trade_timestamp = time.time()
                     self._positions[market.token_id] = Position(
                         token_id=market.token_id,
                         entry_price=price,
@@ -514,6 +678,7 @@ class PolymarketBot:
                             f"Perdida: `{pnl:.2f} USDC` (umbral: -{config.TRADE_LOSS_ALERT_USDC:.0f} USDC)\n"
                             f"Razon: _{signal_.reason}_"
                         )
+                    self._update_loss_tracking(market.token_id, market.label, pnl)
                     self._reporter.send_trade_alert(
                         "SELL", market.label, price, pos.size_usdc,
                         self._paper.balance, pnl=pnl, paper=True, confidence=confidence,
@@ -614,6 +779,31 @@ class PolymarketBot:
             if time.time() - self._last_backup >= config.BACKUP_INTERVAL_SECONDS:
                 self._do_backup()
                 self._last_backup = time.time()
+
+            # Save complete bot state every 30 minutes (feature 5)
+            if time.time() - self._last_state_save >= config.STATE_SAVE_INTERVAL_SECONDS:
+                self._save_state()
+                self._last_state_save = time.time()
+
+            # Daily health check at 09:00 (feature 4)
+            if self._reporter.should_health_check():
+                checks = self._run_health_check()
+                self._reporter.send_health_check(checks)
+
+            # Alert if bot running > 24h without any trade (feature 3)
+            no_trade_threshold = config.NO_TRADE_ALERT_HOURS * 3600
+            bot_age = time.time() - self._bot_start_time
+            since_trade = time.time() - self._last_trade_timestamp
+            since_alert = time.time() - self._last_no_trade_alert
+            if (bot_age > no_trade_threshold
+                    and since_trade > no_trade_threshold
+                    and since_alert > no_trade_threshold):
+                self._last_no_trade_alert = time.time()
+                self._reporter.send_alert(
+                    f"*Bot activo pero sin trades en 24h*\n"
+                    f"Ultimo trade: hace `{since_trade / 3600:.1f}h`\n"
+                    f"El bot sigue corriendo pero no ha encontrado condiciones de entrada."
+                )
 
             if self.running:
                 log.info("Esperando %d segundos...", config.LOOP_INTERVAL_SECONDS)
