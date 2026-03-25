@@ -353,53 +353,54 @@ class PolymarketBot:
 
 
 # ---------------------------------------------------------------------------
-# Punto de entrada — EDITA AQUÍ TUS MERCADOS
+# Punto de entrada — Mercados activos (actualizado 2026-03-25)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     markets_to_watch = [
 
-        # 1. FIFA — Spain wins 2026 World Cup (YES, ~15 cents)
-        #    Buy if dips under 12 cents, sell above 25 cents.
+        # 1. SPORTS — OKC Thunder wins 2026 NBA Finals (YES, ~38.5 cents)
+        #    Near 50/50 market — most tradeable. $151K vol/day, $292K liquidity.
+        #    Thresholds set tight (±2-3%) so normal fluctuations trigger trades.
         MarketConfig(
-            token_id="4394372887385518214471608448209527405727552777602031099972143344338178308080",
-            label="Spain wins World Cup 2026",
+            token_id="49500299856831034491021962156746701298730459370557900271970866855042624695770",
+            label="OKC Thunder wins NBA Finals",
             strategy="value_threshold",
-            buy_below=0.12,
-            sell_above=0.25,
+            buy_below=0.375,
+            sell_above=0.408,
             size_usdc=10,
         ),
 
-        # 2. CRYPTO — Bitcoin hits $1M before GTA VI release (YES, ~49 cents)
-        #    Near 50/50 market; buy dips under 40 cents, sell above 65 cents.
+        # 2. FIFA — England wins 2026 World Cup (YES, ~12.9 cents)
+        #    $610K vol/day, $1.3M liquidity — most liquid FIFA market.
         MarketConfig(
-            token_id="105267568073659068217311993901927962476298440625043565106676088842803600775810",
-            label="Bitcoin $1M before GTA VI",
+            token_id="115556263888245616435851357148058235707004733438163639091106356867234218207169",
+            label="England wins World Cup 2026",
             strategy="value_threshold",
-            buy_below=0.40,
-            sell_above=0.65,
+            buy_below=0.120,
+            sell_above=0.142,
             size_usdc=10,
         ),
 
-        # 3. US POLITICS — Jasmine Crockett wins 2028 Dem nomination (YES, ~0.75 cents)
-        #    Low probability market; buy dips under 0.5 cents, sell above 2 cents.
+        # 3. FIFA — Argentina wins 2026 World Cup (YES, ~10.1 cents)
+        #    $531K vol/day, $1.1M liquidity.
         MarketConfig(
-            token_id="22103094389913052942362639589409218272323168761614999702665821259175535456835",
-            label="Crockett wins 2028 Dem nom",
+            token_id="18812649149814341758733697580460697418474693998558159483117100240528657629879",
+            label="Argentina wins World Cup 2026",
             strategy="value_threshold",
-            buy_below=0.005,
-            sell_above=0.02,
+            buy_below=0.093,
+            sell_above=0.113,
             size_usdc=10,
         ),
 
-        # 4. AI/TECH — Elon Musk wins 2028 US Presidential Election (YES, ~1 cent)
-        #    Speculative tech-adjacent market; buy under 0.8 cents, sell above 3 cents.
+        # 4. FIFA — Brazil wins 2026 World Cup (YES, ~8.7 cents)
+        #    $239K vol/day, $926K liquidity.
         MarketConfig(
-            token_id="26641906520532802078452346454133721131611596169940893262820937050881742190686",
-            label="Elon Musk wins 2028 election",
+            token_id="27576533317283401577758999384642760405921738493660383550832555714312627457443",
+            label="Brazil wins World Cup 2026",
             strategy="value_threshold",
-            buy_below=0.008,
-            sell_above=0.03,
+            buy_below=0.079,
+            sell_above=0.099,
             size_usdc=10,
         ),
 
