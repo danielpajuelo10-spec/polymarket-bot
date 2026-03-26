@@ -40,6 +40,8 @@ from strategy import (
 from paper_trading import PaperTrader
 from optimizer import StrategyOptimizer
 from telegram_reporter import TelegramReporter
+from telegram_commands import TelegramCommandHandler
+from pdf_reporter import generate_weekly_pdf, send_pdf_telegram
 from sentiment import SentimentAnalyzer
 from logger import get_logger
 
@@ -136,6 +138,13 @@ class PolymarketBot:
 
         # Telegram daily reporter
         self._reporter = TelegramReporter()
+
+        # Telegram command handler (/status, /balance, /pause, /resume)
+        self._cmd_handler = TelegramCommandHandler(
+            self._reporter.token,
+            self._reporter.chat_id,
+        )
+        self._cmd_handler.start(self)
 
         # Restore persisted safety state from previous run
         self._load_state()
@@ -678,6 +687,8 @@ class PolymarketBot:
                             f"Perdida: `{pnl:.2f} USDC` (umbral: -{config.TRADE_LOSS_ALERT_USDC:.0f} USDC)\n"
                             f"Razon: _{signal_.reason}_"
                         )
+                    # Reset cooldown from SELL time so 4h counts from close, not open
+                    self._last_trade_time[market.token_id] = time.time()
                     self._update_loss_tracking(market.token_id, market.label, pnl)
                     self._reporter.send_trade_alert(
                         "SELL", market.label, price, pos.size_usdc,
@@ -689,6 +700,8 @@ class PolymarketBot:
                     self.client, market.token_id, "SELL", price, pos.size_usdc
                 )
                 if result:
+                    # Reset cooldown from SELL time so 4h counts from close, not open
+                    self._last_trade_time[market.token_id] = time.time()
                     del self._positions[market.token_id]
                     self._reporter.send_trade_alert(
                         "SELL", market.label, price, pos.size_usdc,
@@ -765,7 +778,7 @@ class PolymarketBot:
                 )
                 self._reporter.send_daily_report(starting, prices)
 
-            # Send Telegram weekly summary every Monday at 08:00
+            # Send Telegram weekly summary every Monday at 08:00 + PDF report
             if self._reporter.should_weekly_report():
                 prices = self._get_current_prices()
                 starting = (
@@ -774,6 +787,16 @@ class PolymarketBot:
                     else config.PAPER_TRADING_BALANCE
                 )
                 self._reporter.send_weekly_report(starting, prices)
+                # Generate and send PDF report
+                pdf_path = generate_weekly_pdf(starting)
+                if pdf_path:
+                    now_str = __import__("datetime").datetime.now().strftime("%Y-%m-%d")
+                    send_pdf_telegram(
+                        self._reporter.token,
+                        self._reporter.chat_id,
+                        pdf_path,
+                        caption=f"*Informe semanal PDF — {now_str}*",
+                    )
 
             # Hourly backup of paper_trades.json
             if time.time() - self._last_backup >= config.BACKUP_INTERVAL_SECONDS:
