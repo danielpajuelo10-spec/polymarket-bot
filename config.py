@@ -55,7 +55,7 @@ BALANCE_FLOOR_USDC   = float(os.getenv("BALANCE_FLOOR_USDC",   "850"))  # pausa 
 MAX_POSITION_PCT     = float(os.getenv("MAX_POSITION_PCT",     "5"))    # max % equity por operación
 MAX_EXPOSURE_PCT     = float(os.getenv("MAX_EXPOSURE_PCT",     "30"))   # max % equity en posiciones
 MIN_CONFIDENCE       = int(os.getenv("MIN_CONFIDENCE",         "60"))   # score mínimo para operar
-MIN_LIQUIDITY_USDC   = float(os.getenv("MIN_LIQUIDITY_USDC",   "500000"))  # omite mercados ilíquidos
+MIN_LIQUIDITY_USDC   = float(os.getenv("MIN_LIQUIDITY_USDC",   "150000"))  # omite mercados ilíquidos
 MAX_DRAWDOWN_24H_PCT = float(os.getenv("MAX_DRAWDOWN_24H_PCT", "15"))   # bloquea si cayó >15% en 24h
 
 # --- Alertas y backups ---
