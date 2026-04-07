@@ -43,6 +43,8 @@ from telegram_reporter import TelegramReporter
 from telegram_commands import TelegramCommandHandler
 from pdf_reporter import generate_weekly_pdf, send_pdf_telegram
 from sentiment import SentimentAnalyzer
+from whale_tracker import WhaleTracker
+from signal_enhancer import VolumeSpike, KellySizer, CorrelationFilter
 from logger import get_logger
 
 log = get_logger()
@@ -136,6 +138,32 @@ class PolymarketBot:
         # News sentiment analyser
         self._sentiment = SentimentAnalyzer()
 
+        # Whale tracker (señal de confirmación on-chain)
+        self._whale_tracker = WhaleTracker(
+            wallets=config.WHALE_WALLETS,
+            lookback_hours=4,
+            cache_ttl_seconds=300,
+        )
+
+        # Volume spike detector
+        self._volume_spike = VolumeSpike(
+            spike_threshold=config.VOLUME_SPIKE_THRESHOLD,
+            cache_ttl_seconds=180,
+        )
+
+        # Kelly position sizer (reemplaza el size fijo de $10)
+        self._kelly = KellySizer(
+            min_size=config.KELLY_MIN_SIZE_USDC,
+            max_size=config.KELLY_MAX_SIZE_USDC,
+            default_size=config.KELLY_DEFAULT_USDC,
+            kelly_fraction=config.KELLY_FRACTION,
+            min_history=config.KELLY_MIN_HISTORY,
+        )
+
+        # Correlation filter (evita posiciones contradictorias entre mercados WC)
+        self._corr_filter = CorrelationFilter(token_map=config.WC_TOKEN_MAP)
+        self._corr_filter.add_exclusive_group(list(config.WC_TOKEN_MAP.keys()))
+
         # Telegram daily reporter
         self._reporter = TelegramReporter()
 
@@ -148,6 +176,9 @@ class PolymarketBot:
 
         # Restore persisted safety state from previous run
         self._load_state()
+
+        # Cargar historial de trades en el Kelly sizer para aprovechar datos existentes
+        self._load_kelly_history()
 
         # Manejador de señales para Ctrl+C limpio
         signal.signal(signal.SIGINT, self._handle_exit)
@@ -379,6 +410,18 @@ class PolymarketBot:
         except Exception as exc:
             log.warning("[STATE] Error al cargar estado: %s", exc)
 
+    def _load_kelly_history(self) -> None:
+        """Carga el historial de paper_trades.json en el Kelly sizer."""
+        try:
+            with open("paper_trades.json", encoding="utf-8") as f:
+                data = json.load(f)
+            trades = data.get("trades", [])
+            self._kelly.load_from_paper_trades(trades)
+        except FileNotFoundError:
+            log.info("[KELLY] Sin historial previo — usando tamaño por defecto ($%.0f)", config.KELLY_DEFAULT_USDC)
+        except Exception as exc:
+            log.warning("[KELLY] Error al cargar historial: %s", exc)
+
     # -----------------------------------------------------------------------
     # Per-market loss tracking (consecutive losses + blacklist)
     # -----------------------------------------------------------------------
@@ -525,6 +568,11 @@ class PolymarketBot:
                                 f"Razon: _{exit_signal.reason}_"
                             )
                         self._update_loss_tracking(market.token_id, market.label, pnl)
+                        # Actualizar Kelly con el resultado del trade
+                        self._kelly.record_trade(
+                            won=(pnl >= 0),
+                            pnl_pct=pnl / size_usdc if size_usdc > 0 else 0.0,
+                        )
                         self._reporter.send_trade_alert(
                             "SELL", market.label, price, size_usdc,
                             self._paper.balance, pnl=pnl, paper=True,
@@ -641,6 +689,75 @@ class PolymarketBot:
                 )
                 return
 
+            # ---- Filter 9: volume spike (actividad inusual en el mercado) ----
+            try:
+                spike = self._volume_spike.check(market.token_id)
+                if spike.is_spike:
+                    log.info(
+                        "[%s] Volume spike %s detectado — ratio=%.1fx "
+                        "(vol 1h: $%.0f vs baseline: $%.0f/h)",
+                        market.label, spike.strength, spike.spike_ratio,
+                        spike.recent_volume_usdc, spike.baseline_volume_usdc,
+                    )
+                    spike_multiplier = 1.2 if spike.spike_ratio < 4.0 else 0.8
+                else:
+                    spike_multiplier = 1.0
+            except Exception as exc:
+                log.debug("[%s] VolumeSpike error: %s", market.label, exc)
+                spike_multiplier = 1.0
+
+            # ---- Filter 10: whale confirmation ----
+            try:
+                whale_score = self._whale_tracker.get_confirmation_score(market.token_id, "BUY")
+                if whale_score < 0.5 and config.WHALE_WALLETS:
+                    log.info(
+                        "[%s] Whales van en contra (score=%.2f) — BUY bloqueado",
+                        market.label, whale_score,
+                    )
+                    return
+                whale_multiplier = 0.5 + whale_score  # rango 0.5-1.5
+                if whale_score > 0.5 and config.WHALE_WALLETS:
+                    log.info("[%s] Confirmacion whale (score=%.2f)", market.label, whale_score)
+            except Exception as exc:
+                log.debug("[%s] WhaleTracker error: %s", market.label, exc)
+                whale_multiplier = 1.0
+
+            # ---- Filter 11: correlation check ----
+            try:
+                open_pos = {}
+                if self.paper_trading and self._paper:
+                    open_pos = {tid: "BUY" for tid in self._paper.positions}
+                else:
+                    open_pos = {tid: "BUY" for tid in self._positions}
+                corr_warning = self._corr_filter.check_new_trade(market.token_id, "BUY", open_pos)
+                if corr_warning:
+                    log.warning("[%s] Correlacion: %s", market.label, corr_warning)
+                    # No bloquea, pero reduce confianza
+                    corr_multiplier = 0.7
+                else:
+                    corr_multiplier = 1.0
+            except Exception as exc:
+                log.debug("[%s] CorrelationFilter error: %s", market.label, exc)
+                corr_multiplier = 1.0
+
+            # ---- Kelly position sizing (reemplaza size fijo) ----
+            confidence_normalized = confidence / 100.0  # 0-1
+            combined_multiplier = spike_multiplier * whale_multiplier * corr_multiplier
+            kelly_size = self._kelly.get_size(
+                balance=self._total_equity(),
+                confidence_multiplier=confidence_normalized * combined_multiplier,
+            )
+            # Respetar los límites de riesgo ya calculados (max_by_pct, max_exposure)
+            size = min(kelly_size, max_by_pct)
+            size = max(1.0, size)
+            log.info(
+                "[%s] Kelly size: $%.2f (kelly_raw=$%.2f, conf=%.0f, "
+                "spike=%.1fx, whale=%.2f, corr=%.1fx) | stats=%s",
+                market.label, size, kelly_size, confidence,
+                spike_multiplier, whale_multiplier, corr_multiplier,
+                self._kelly.stats,
+            )
+
             log.info("[%s] COMPRANDO | Confianza: %d/100 | Razon: %s", market.label, confidence, signal_.reason)
             if self.paper_trading and self._paper:
                 ok = self._paper.simulate_buy(market.token_id, market.label, price, size)
@@ -690,6 +807,11 @@ class PolymarketBot:
                     # Reset cooldown from SELL time so 4h counts from close, not open
                     self._last_trade_time[market.token_id] = time.time()
                     self._update_loss_tracking(market.token_id, market.label, pnl)
+                    # Actualizar Kelly con el resultado del trade
+                    self._kelly.record_trade(
+                        won=(pnl >= 0),
+                        pnl_pct=pnl / pos.size_usdc if pos.size_usdc > 0 else 0.0,
+                    )
                     self._reporter.send_trade_alert(
                         "SELL", market.label, price, pos.size_usdc,
                         self._paper.balance, pnl=pnl, paper=True, confidence=confidence,
@@ -777,6 +899,18 @@ class PolymarketBot:
                     else config.PAPER_TRADING_BALANCE
                 )
                 self._reporter.send_daily_report(starting, prices)
+                # Enviar resumen de señales adicionales
+                kelly_stats = self._kelly.stats
+                whale_status = self._whale_tracker.status()
+                if kelly_stats["trades"] > 0:
+                    self._reporter.send_alert(
+                        f"📊 *Señales adicionales (24h)*\n"
+                        f"Kelly — Win rate: `{kelly_stats['win_rate']*100:.1f}%` "
+                        f"({kelly_stats['trades']} trades) | "
+                        f"Kelly%: `{kelly_stats['kelly_pct']*100:.1f}%`\n"
+                        f"Whales monitoreadas: `{whale_status['wallets_monitored']}`\n"
+                        f"Caché whale activa: `{whale_status['cache_entries']} tokens`"
+                    )
 
             # Send Telegram weekly summary every Monday at 08:00 + PDF report
             if self._reporter.should_weekly_report():
