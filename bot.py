@@ -970,131 +970,35 @@ class PolymarketBot:
 
 
 # ---------------------------------------------------------------------------
-# Punto de entrada — Mercados activos (actualizado 2026-03-25)
+# Punto de entrada — mercados auto-descubiertos por volumen
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    from find_markets import get_top_markets
+
+    raw = get_top_markets(n_dynamic=8)
+
     markets_to_watch = [
-
-        # 1. SPORTS — OKC Thunder wins 2026 NBA Finals (YES, ~38-39 cents)
-        #    Near 50/50 — highest liquidity & daily volume. Mean reversion
-        #    catches intraday oscillations. window=10 builds fast; std=0.4
-        #    fires on small deviations to maximise trade frequency.
         MarketConfig(
-            token_id="49500299856831034491021962156746701298730459370557900271970866855042624695770",
-            label="OKC Thunder wins NBA Finals",
-            strategy="mean_reversion",
-            size_usdc=10,
-            news_query="Oklahoma City Thunder NBA Finals 2026",
-            mr_window=10,
-            mr_std_threshold=0.4,
-            liquidity_usdc=301_635,
-        ),
-
-        # 2. FIFA — England wins 2026 World Cup (YES, ~13 cents)
-        #    buy_below set just above last observed price -> immediate entry.
-        #    Take-profit / stop-loss in .env handle the exit.
-        MarketConfig(
-            token_id="115556263888245616435851357148058235707004733438163639091106356867234218207169",
-            label="England wins World Cup 2026",
-            strategy="value_threshold",
-            buy_below=0.135,
-            sell_above=0.150,
-            size_usdc=10,
-            news_query="England FIFA World Cup 2026",
-            liquidity_usdc=1_342_046,
-        ),
-
-        # 3. FIFA — Argentina wins 2026 World Cup (YES, ~10 cents)
-        MarketConfig(
-            token_id="18812649149814341758733697580460697418474693998558159483117100240528657629879",
-            label="Argentina wins World Cup 2026",
-            strategy="value_threshold",
-            buy_below=0.105,
-            sell_above=0.118,
-            size_usdc=10,
-            news_query="Argentina FIFA World Cup 2026",
-            liquidity_usdc=1_117_199,
-        ),
-
-        # 4. FIFA — Brazil wins 2026 World Cup (YES, ~8-9 cents)
-        MarketConfig(
-            token_id="27576533317283401577758999384642760405921738493660383550832555714312627457443",
-            label="Brazil wins World Cup 2026",
-            strategy="value_threshold",
-            buy_below=0.090,
-            sell_above=0.102,
-            size_usdc=10,
-            news_query="Brazil FIFA World Cup 2026",
-            liquidity_usdc=923_093,
-        ),
-
-        # 5. FIFA — France wins 2026 World Cup (YES, ~10.6 cents)
-        #    $65K vol/day, $1.3M liquidity. Mean reversion window=10.
-        MarketConfig(
-            token_id="108233603819467706476318984012158651931658302669301887462181073562758483842092",
-            label="France wins World Cup 2026",
-            strategy="mean_reversion",
-            size_usdc=10,
-            news_query="France FIFA World Cup 2026",
-            mr_window=10,
-            mr_std_threshold=0.4,
-            liquidity_usdc=1_337_354,
-        ),
-
-        # 6. FIFA — Germany wins 2026 World Cup (YES, ~5.2 cents)
-        #    $91K vol/day, $638K liquidity.
-        MarketConfig(
-            token_id="81739002353269632749850710185641576213562066971072676369728657545679630163887",
-            label="Germany wins World Cup 2026",
-            strategy="mean_reversion",
-            size_usdc=10,
-            news_query="Germany FIFA World Cup 2026",
-            mr_window=10,
-            mr_std_threshold=0.4,
-            liquidity_usdc=638_021,
-        ),
-
-        # 7. FIFA — Portugal wins 2026 World Cup (YES, ~6.9 cents)
-        #    $109K vol/day, $478K liquidity.
-        MarketConfig(
-            token_id="45415751658241142530386585138386640503488308219341470020075667342738719018629",
-            label="Portugal wins World Cup 2026",
-            strategy="mean_reversion",
-            size_usdc=10,
-            news_query="Portugal FIFA World Cup 2026",
-            mr_window=10,
-            mr_std_threshold=0.4,
-            liquidity_usdc=478_009,
-        ),
-
-        # 8. NBA — Boston Celtics wins 2026 Finals (YES, ~11.2 cents)
-        #    $20.7K vol/day, $153K liquidity.
-        MarketConfig(
-            token_id="98951343420969493497594761179562691809954416596888138302255086663562042936451",
-            label="Boston Celtics wins NBA Finals",
-            strategy="mean_reversion",
-            size_usdc=10,
-            news_query="Boston Celtics NBA Finals 2026",
-            mr_window=10,
-            mr_std_threshold=0.4,
-            liquidity_usdc=153_062,
-        ),
-
-        # 9. CRYPTO — Will Bitcoin hit $1M before GTA VI? (YES, ~48.8 cents)
-        #    Best crypto proxy: near-50/50, $423K liquidity, $13.7K vol/day.
-        MarketConfig(
-            token_id="105267568073659068217311993901927962476298440625043565106676088842803600775810",
-            label="Bitcoin hits $1M before GTA VI",
-            strategy="mean_reversion",
-            size_usdc=10,
-            news_query="Bitcoin price 2026",
-            mr_window=10,
-            mr_std_threshold=0.4,
-            liquidity_usdc=423_763,
-        ),
-
+            token_id=m["token_id"],
+            label=m["label"],
+            strategy=m.get("strategy", "mean_reversion"),
+            buy_below=m.get("buy_below", 0.35),
+            sell_above=m.get("sell_above", 0.65),
+            size_usdc=m.get("size_usdc", 10),
+            news_query=m.get("news_query", ""),
+            mr_window=m.get("mr_window", 20),
+            mr_std_threshold=m.get("mr_std_threshold", 1.5),
+            liquidity_usdc=m.get("liquidity_usdc", 0),
+        )
+        for m in raw
     ]
+
+    log.info(
+        "[STARTUP] %d mercados cargados: %s",
+        len(markets_to_watch),
+        ", ".join(m.label for m in markets_to_watch),
+    )
 
     bot = PolymarketBot(markets=markets_to_watch)
     bot.run()
