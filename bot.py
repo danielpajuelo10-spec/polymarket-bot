@@ -970,35 +970,28 @@ class PolymarketBot:
 
 
 # ---------------------------------------------------------------------------
-# Punto de entrada — mercados auto-descubiertos por volumen
+# Punto de entrada — 13 mercados (5 WC fijos + 8 alto volumen)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from find_markets import get_top_markets
-
-    raw = get_top_markets(n_dynamic=8)
-
     markets_to_watch = [
-        MarketConfig(
-            token_id=m["token_id"],
-            label=m["label"],
-            strategy=m.get("strategy", "mean_reversion"),
-            buy_below=m.get("buy_below", 0.35),
-            sell_above=m.get("sell_above", 0.65),
-            size_usdc=m.get("size_usdc", 10),
-            news_query=m.get("news_query", ""),
-            mr_window=m.get("mr_window", 20),
-            mr_std_threshold=m.get("mr_std_threshold", 1.5),
-            liquidity_usdc=m.get("liquidity_usdc", 0),
-        )
-        for m in raw
+        # --- Mundial 2026 ---
+        MarketConfig(token_id="108233603819467706476318984012158651931658302669301887462181073562758483842092", label="France wins World Cup 2026", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="France World Cup 2026", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=2874914),
+        MarketConfig(token_id="81739002353269632749850710185641576213562066971072676369728657545679630163887", label="Germany wins World Cup 2026", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Germany World Cup 2026", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=4921217),
+        MarketConfig(token_id="115556263888245616435851357148058235707004733438163639091106356867234218207169", label="England wins World Cup 2026", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="England World Cup 2026", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=2708401),
+        MarketConfig(token_id="18812649149814341758733697580460697418474693998558159483117100240528657629879", label="Argentina wins World Cup 2026", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Argentina World Cup 2026", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=3544183),
+        MarketConfig(token_id="27576533317283401577758999384642760405921738493660383550832555714312627457443", label="Brazil wins World Cup 2026", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Brazil World Cup 2026", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=3097588),
+        # --- Alto volumen 2026-04-08 ---
+        MarketConfig(token_id="2916184120206223749839849644877707470354946028257066951797428049170871002238", label="US forces enter Iran by April 30?", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="US forces Iran April 2026", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=9334000),
+        MarketConfig(token_id="37126434962149084556522721025504254258386171468763869879755961635390358765833", label="Will Beto O'Rourke win 2028 Democratic nomination?", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Beto O'Rourke 2028 nomination", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=1355000),
+        MarketConfig(token_id="81633484456710374417893908729547682494682988109908206793820145554076776128889", label="Will Phil Murphy win 2028 Democratic nomination?", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Phil Murphy 2028 nomination", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=2155000),
+        MarketConfig(token_id="49500299856831034491021962156746701298730459370557900271970866855042624695770", label="OKC Thunder wins NBA Finals 2026", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="OKC Thunder NBA Finals 2026", mr_window=10, mr_std_threshold=0.4, liquidity_usdc=301635),
+        MarketConfig(token_id="98951343420969493497594761179562691809954416596888138302255086663562042936451", label="Boston Celtics wins NBA Finals 2026", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Boston Celtics NBA Finals 2026", mr_window=10, mr_std_threshold=0.4, liquidity_usdc=153062),
+        MarketConfig(token_id="31335564527155177318544135513783493075328451393660649396114225549873718295223", label="US forces enter Iran by Dec 31?", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="US forces Iran 2026", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=780000),
+        MarketConfig(token_id="22103094389913052942760671847503869600197668843765668268386940527699940774804", label="Will Jasmine Crockett win 2028 Democratic nomination?", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Jasmine Crockett 2028 nomination", mr_window=20, mr_std_threshold=1.5, liquidity_usdc=866000),
+        MarketConfig(token_id="10526756807365906821731199390192796247629844406250435651066760888842803600775810", label="Bitcoin hits 1M before GTA VI?", strategy="mean_reversion", buy_below=0.35, sell_above=0.65, size_usdc=10, news_query="Bitcoin price 2026", mr_window=10, mr_std_threshold=0.4, liquidity_usdc=423763),
     ]
 
-    log.info(
-        "[STARTUP] %d mercados cargados: %s",
-        len(markets_to_watch),
-        ", ".join(m.label for m in markets_to_watch),
-    )
-
+    log.info("[STARTUP] %d mercados cargados", len(markets_to_watch))
     bot = PolymarketBot(markets=markets_to_watch)
     bot.run()
